@@ -190,19 +190,19 @@ public:
 private:
     /**
      * Processes num, adding info to globals.result_table
+     * num should be odd
+     * start_num and checkpoint can be odd or even
      */
     void process(uint64_t num, uint64_t start_num, uint64_t checkpoint) {
+        // During the loop we increment by 2 * num to hit only odd multiples of num
         uint64_t interval = 2 * num;
 
-        // Start never goes below 0 or funky stuff happens
-        // Always start at least at 2 * num
-        // TODO Should this actually start at num instead of 2num?
-        uint64_t start = (start_num / interval) * interval + interval;
-        if (start % 2 == 0) {
-            start += num;
-        }
+        // We calculate the start to be the first odd multiple of num larger than start_num
+        uint64_t multiple = start_num % num + 1;
+        multiple += 1 - (multiple % 2); // Adjust to be next odd number
 
-        for (uint64_t i = start; i < checkpoint; i = i + interval) {
+        // Loop over every odd multiple of num between start_num and checkpoint
+        for (uint64_t i = multiple * num; i < checkpoint; i = i + interval) {
             (*globals.result_table)[i] = false;
         }
     }
