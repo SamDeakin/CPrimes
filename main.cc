@@ -286,9 +286,10 @@ int main() {
 
         size_t next_thread = NUM_THREADS;
         for (
-                uint64_t i = globals.checkpoint[1]; // Start at end of last checkpoint
+                // Start at first odd number after end of last checkpoint
+                uint64_t i = globals.checkpoint[1] + ((globals.checkpoint[1] + 1) % 2);
                 i < globals.checkpoint[0]; // Iterate over every number less than current checkpoint
-                i = i * 2 // Iterate over odd numbers
+                i = i + 2 // Iterate over odd numbers
                 ) {
             next_thread = (next_thread + 1) % NUM_THREADS; // We do this first so it happens outside of the lock
             unique_lock<mutex> lk(contexts[next_thread].mtx);
@@ -310,7 +311,7 @@ int main() {
             results = NULL;
         }
 
-        // Skip this step on the last iteration
+        // Skip this step on the last iteration because threads will exit instead of wait
         if (globals.checkpoint[0] < globals.max_range) {
             /**
              * Wait for every thread to finish this checkpoint
