@@ -42,7 +42,7 @@ struct GlobalInfo {
      * All_queued is true when the main thread is done queueing numbers for this checkpoint. Threads should wait on
      * cv when they have finished their queue and this is true.
      * The mtx should be held before accessing all_queued. To prevent deadlock, it should be considered an invalid
-     * behavior to acquire a ThreadContext mtx after acquiring this one.
+     * behavior to attempt to acquire this lock while holding a ThreadContext Lock.
      */
     mutex mtx;
     bool all_queued;
@@ -117,9 +117,20 @@ public:
      * The main thread loop for this program.
      * info is the local ThreadContext object for this thread.
      *
-     * The loop essentially does three things over and over until the main thread exits and is finished.
-     *
-     * TODO finish this comment
+     * This is a high level description of what the loop does:
+     *  First drains prime and adds items to a new prime
+     *      This is first because items from done_to_checkpoint will be added to the new prime
+     *  Second drains done_to_checkpoint
+     *      Items will be discarded and not processed if they are not prime
+     *  Third threads will drain their queue and then check if they should wait for others to finish the checkpoint
+     *      Threads will acquire their lock then check the queue for the next number
+     *      If there is a number they will release the lock, process that number, then repeat
+     *      If there is no number they will acquire the global lock and check if the checkpoint is finished queueing
+     *      If it is finished queueing the thread proceeds to step 4
+     *      If it is not finished queueing the thread waits on it's own cv
+     *  Fourth threads will check if the current checkpoint is the last checkpoint
+     *      Exit if it's the last checkpoint
+     *      Repeat from step 1 if it's not
      */
     void run() {
         bool local_done_checkpoint = false;
@@ -241,6 +252,16 @@ void wait_for_threads(ThreadContext *contexts) {
     }
 }
 
+/**
+ * Notify all threads to continue work
+ */
+void notify_all_threads(ThreadContext *contexts) {
+    for (size_t i = 0; i < NUM_THREADS; i++) {
+        unique_lock<mutex> lk(contexts[i].mtx);
+        contexts[i].cv.notify_all();
+    }
+}
+
 
 int main() {
     uint64_t last_queued;
@@ -300,6 +321,10 @@ int main() {
         {
             unique_lock<mutex> lk(globals.mtx);
             globals.all_queued = true;
+
+            // Here we must notify all threads again in case they checked all_queued to be false between when their
+            // last value was finished and now correcting that race condition.
+            notify_all_threads(contexts);
         }
 
         // Results will be NULL on the first two loops
