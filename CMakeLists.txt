@@ -8,8 +8,8 @@ set(SOURCE_FILES
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/lib/tbb/include)
 
-set(TBB_PATH_HINT ${CMAKE_CURRENT_SOURCE_DIR}/lib/tbb/build/)
-find_file(TBB_LIB NAMES libtbb.dylib HINTS ${TBB_PATH_HINT} NO_CMAKE_FIND_ROOT_PATH)
+set(TBB_PATH_HINT ${CMAKE_CURRENT_SOURCE_DIR}/lib/tbb/build/*/)
+find_file(TBB_LIB NAMES libtbb.dylib HINTS ${TBB_PATH_HINT} NO_DEFAULT_PATH)
 
 add_executable(CPrimes ${SOURCE_FILES})
 target_link_libraries(CPrimes ${TBB_LIB})
