@@ -135,9 +135,6 @@ public:
     void run() {
         bool local_done_checkpoint = false;
 
-        queue<uint64_t> *done_to_checkpoint = new queue<uint64_t>();
-        queue<uint64_t> *prime = new queue<uint64_t>();
-
         while(true) {
             uint64_t next;
 
@@ -199,6 +196,9 @@ public:
     }
 
 private:
+    queue<uint64_t> *done_to_checkpoint;
+    queue<uint64_t> *prime;
+
     /**
      * Processes num, adding info to globals.result_table
      * num should be odd
@@ -215,6 +215,41 @@ private:
         // Loop over every odd multiple of num between start_num and checkpoint
         for (uint64_t i = multiple * num; i < checkpoint; i = i + interval) {
             (*globals.result_table)[i] = false;
+        }
+    }
+
+    /**
+     * Drains prime, processing all elements in it
+     */
+    void drain_prime(uint64_t start_num, uint64_t checkpoint) {
+        // We replace prime with a new queue because it is easy to just requeue into a new queue
+        queue<uint64_t> *new_prime = new queue<uint64_t>();
+
+        while (!prime->empty()) {
+            uint64_t next = prime->front();
+            process(next, start_num, checkpoint);
+            new_prime->push(next);
+            prime->pop();
+        }
+
+        delete prime;
+        prime = new_prime;
+    }
+
+    /**
+     * Drains done_to_checkpoint
+     * Like drain_prime, but elements that aren't prime aren't requeued or processed
+     */
+    void drain_done_to_checkpoint(uint64_t start_num, uint64_t checkpoint) {
+        while (!done_to_checkpoint->empty()) {
+            uint64_t next = done_to_checkpoint->front();
+
+            if (globals.is_prime(next)) {
+                process(next, start_num, checkpoint);
+                prime->push(next);
+            }
+
+            done_to_checkpoint->pop();
         }
     }
 };
