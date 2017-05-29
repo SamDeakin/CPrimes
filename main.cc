@@ -133,64 +133,26 @@ public:
      *      Repeat from step 1 if it's not
      */
     void run() {
-        bool local_done_checkpoint = false;
+        done_to_checkpoint = new queue<uint64_t>();
+        prime = new queue<uint64_t>();
 
-        while(true) {
-            uint64_t next;
+        do {
+            // First figure out the range to process over this iteration
+            uint64_t start_num = globals.checkpoint[1];
+            uint64_t checkpoint = globals.checkpoint[0];
 
-            {
-                /**
-                 * Just a block to hold our lock ~music notes emoji~
-                 */
-                // TODO redo waiting logic
-                unique_lock<mutex> lk(this->mtx);
-                // TODO Threads should exit when done the last checkpoint
+            // Step one
+            drain_prime(start_num, checkpoint);
 
-                while(this->q.empty() && !this->exit_when_finished) {
-                    this->cv.wait(lk);
-                }
+            // Step two
+            drain_done_to_checkpoint(start_num, checkpoint);
 
-                if (this->q.empty() && this->exit_when_finished) {
-                    break;
-                }
+            // Step three
+            process_queue(start_num, checkpoint);
 
-                next = this->q.front();
-                this->q.pop();
-            }
+            // Step four
+        } while (!should_exit());
 
-            if (local_done_checkpoint && globals.checkpoint[0] == globals.max_try) {
-                /**
-                 * In this step we wait for the main thread to any atomic operations on globals then signal the checkpoint
-                 * has been updated.
-                 */
-                unique_lock<mutex> lk(this->mtx);
-                this->done_checkpoint = true;
-                globals.cv.wait(lk);
-                this->done_checkpoint = false);
-            }
-
-            // Since next is a new number, process from start_range to the checkpoint
-            this->process(next, globals.start_range, globals.checkpoint[0]);
-
-            // TODO add next to done_to_checkpoint (maybe if local_checkpoint != max_try)
-
-            // Check for updated checkpoint
-            if (checkpoint != local_checkpoint && !local_done_checkpoint) {
-                // TODO process held queues then update checkpoint
-                // After processing: If local_checkpoint == max_try then don't requeue number?
-                // After processing: test primeness and put into primes if < local_last_checkpoint
-
-                local_done_checkpoint = true;
-            }
-
-            // TODO
-            // Make sure thread's don't immediately start up then wait on a lock that main won't signal
-            // Make sure it's impossible for run to lock on empty queue before checkpoint is updated
-            // Make sure when first checkpoint == max_try thread doesn't exit before receiving queue stuff
-        }
-
-        // TODO make sure prime and done_to_checkpoint get drained
-        // TODO Clean up thread
         delete done_to_checkpoint;
         delete prime;
     }
@@ -211,6 +173,11 @@ private:
         // We calculate the start to be the first odd multiple of num larger than start_num
         uint64_t multiple = start_num % num + 1;
         multiple += 1 - (multiple % 2); // Adjust to be next odd number
+
+        // We don't want to process num ever
+        if (multiple == 1) {
+            multiple += 2;
+        }
 
         // Loop over every odd multiple of num between start_num and checkpoint
         for (uint64_t i = multiple * num; i < checkpoint; i = i + interval) {
@@ -251,6 +218,21 @@ private:
 
             done_to_checkpoint->pop();
         }
+    }
+
+    /**
+     * Returns true if the thread should exit because the program is done executing
+     * In practice this returns true if the last checkpoint processed up to max_range
+     */
+    bool should_exit() {
+        return globals.checkpoint[1] < globals.max_range;
+    }
+
+    /**
+     *
+     */
+    void process_queue(uint64_t start_num, uint64_t checkpoint) {
+        // TODO
     }
 };
 
