@@ -124,7 +124,8 @@ public:
      *      Items will be discarded and not processed if they are not prime
      *  Third threads will drain their queue and then check if they should wait for others to finish the checkpoint
      *      Threads will acquire their lock then check the queue for the next number
-     *      If there is a number they will release the lock, process that number, then repeat
+     *      Threads then release their lock
+     *      If there is a number they will process that number, then repeat
      *      If there is no number they will acquire the global lock and check if the checkpoint is finished queueing
      *      If it is finished queueing the thread proceeds to step 4
      *      If it is not finished queueing the thread waits on it's own cv
@@ -229,10 +230,42 @@ private:
     }
 
     /**
-     *
+     * Processes the thread queue
+     * This is the complicated part of the thread that must work well with the main thread to not deadlock or get stuck
      */
     void process_queue(uint64_t start_num, uint64_t checkpoint) {
-        // TODO
+        bool done = false;
+        while (!done) {
+            while(!is_queue_empty()) {
+                uint64_t next = q.front();
+                process(next, start_num, checkpoint);
+                q.pop();
+            }
+
+            // Check if the main thread is done queueing
+            done = done_queueing();
+            if (!done) {
+                // Wait to be notified
+                unique_lock<mutex> lk(mtx);
+                cv.wait(lk);
+            }
+        }
+    }
+
+    /**
+     * Checks if the thread queue is empty
+     */
+    bool is_queue_empty() {
+        unique_lock<mutex> lk(mtx);
+        return q.empty();
+    }
+
+    /**
+     * Checks if the main thread is done queueing
+     */
+    bool done_queueing() {
+        unique_lock<mutex> lk(globals.mtx);
+        return globals.all_queued;
     }
 };
 
@@ -341,6 +374,10 @@ int main() {
 
             // Here we must notify all threads again in case they checked all_queued to be false between when their
             // last value was finished and now correcting that race condition.
+            // Note that we call this while still holding globals.mtx and notify_all_threads acquires individual
+            // thread locks. This prevents threads from checking for a queue and then sleeping between when we finish
+            // and when we declare we are done in a thread ordering where they see all_queued == false but do not sleep
+            // until after notify_all_threads is done.
             notify_all_threads(contexts);
         }
 
