@@ -7,16 +7,13 @@
 
 using namespace std;
 
-class GlobalInfo;
-GlobalInfo globals;
-
 // Tuning variables
 size_t NUM_THREADS = 1;
-size_t MAX_CHECKPOINT_SIZE_PER_THREAD = 20000;
+size_t MAX_CHECKPOINT_SIZE_PER_THREAD = 20;
 #define MAX_CHECKPOINT_SIZE (NUM_THREADS * MAX_CHECKPOINT_SIZE_PER_THREAD)
 
 // TODO when finished disable extra logic and check:
-// Checkpoint updates
+// Checkpoint updates - Good
 // Number processing
 // Number's processed into right checkpoints
 
@@ -45,9 +42,9 @@ struct GlobalInfo {
      * behavior to attempt to acquire this lock while holding a ThreadContext Lock.
      */
     mutex mtx;
-    bool all_queued;
+    volatile uint64_t last_queued;
 
-    uint64_t checkpoint[4];
+    volatile uint64_t checkpoint[4];
 
     /**
      * primes_table should not be modified, only read from to determine if a certain number is prime.
@@ -65,9 +62,9 @@ struct GlobalInfo {
         return it == this->result_table->end() || it->second;
     }
 
-    GlobalInfo() : all_queued(false) {}
+    GlobalInfo() : last_queued(0) {}
 
-    uint64_t update_checkpoint() {
+    void update_checkpoint() {
         // First odd number greater than last checkpoint
         uint64_t end_num = this->checkpoint[0] + MAX_CHECKPOINT_SIZE;
         end_num = end_num + 1 - (end_num % 2); // First odd number greater than last checkpoint
@@ -77,8 +74,17 @@ struct GlobalInfo {
         this->checkpoint[2] = this->checkpoint[1];
         this->checkpoint[1] = this->checkpoint[0];
         this->checkpoint[0] = min(end_num, this->max_range + 1); // Include max_range in this range
+
+        cout << "Check:";
+        for (int i = 0; i < 4; i++) {
+            cout << " " << this->checkpoint[i];
+        }
+        cout << endl;
     }
 };
+// This is bad but it has to be accessible from all threads
+// So many better ways to do this
+GlobalInfo globals;
 
 
 /**
@@ -109,7 +115,7 @@ public:
      * done_checkpoint will be set when the thread has finished all internally held queues
      * and processed one number larger than checkpoint.
      */
-    bool done_checkpoint;
+    volatile bool done_checkpoint;
 
     ThreadContext() : done_checkpoint(false) {}
 
@@ -148,12 +154,33 @@ public:
             // Step two
             drain_done_to_checkpoint(start_num, checkpoint);
 
+            // Wait here if the global checkpoint hasn't been updated yet
+            {
+                unique_lock<mutex> lk(globals.mtx);
+                cout << "Thread speed check: " << globals.last_queued << " " << last_updated_checkpoint << endl;
+                if (globals.last_queued == last_updated_checkpoint) {
+                    globals.cv.wait(lk);
+                }
+            }
+
             // Step three
             process_queue(start_num, checkpoint);
 
+            // Update done_checkpoint to signal we are done the queue
+            cout << "Thread done" << endl;
+            {
+                unique_lock<mutex> lk(mtx);
+                done_checkpoint = true;
+                last_updated_checkpoint = checkpoint;
+                cv.notify_all();
+            }
+
             // Step four
+            // TODO There is an issue where checkpoints aren't updated for next iteration like this
+            // Rewrite update logic to include a next checkpoint value to use here
         } while (!should_exit());
 
+        cout << "Thread Exit" << endl;
         delete done_to_checkpoint;
         delete prime;
     }
@@ -161,6 +188,9 @@ public:
 private:
     queue<uint64_t> *done_to_checkpoint;
     queue<uint64_t> *prime;
+
+    // Keeps track of if the checkpoint has been updated yet
+    uint64_t last_updated_checkpoint = 0;
 
     /**
      * Processes num, adding info to globals.result_table
@@ -180,10 +210,14 @@ private:
             multiple += 2;
         }
 
+        cout << "Proc: " << num << " start: " << multiple * num << " check: " << checkpoint << " interval: " << interval << endl << "   ";
+
         // Loop over every odd multiple of num between start_num and checkpoint
         for (uint64_t i = multiple * num; i < checkpoint; i = i + interval) {
             (*globals.result_table)[i] = false;
+            cout << " " << i;
         }
+        cout << endl;
     }
 
     /**
@@ -226,7 +260,8 @@ private:
      * In practice this returns true if the last checkpoint processed up to max_range
      */
     bool should_exit() {
-        return globals.checkpoint[1] < globals.max_range;
+        cout << "Exit? " << globals.checkpoint[0] << " " << globals.max_range << endl;
+        return globals.checkpoint[0] >= globals.max_range;
     }
 
     /**
@@ -235,11 +270,15 @@ private:
      */
     void process_queue(uint64_t start_num, uint64_t checkpoint) {
         bool done = false;
+        cout << "Thread Process Queue: " << start_num << " " << checkpoint << endl;
         while (!done) {
             while(!is_queue_empty()) {
                 uint64_t next = q.front();
-                process(next, start_num, checkpoint);
                 q.pop();
+                process(next, start_num, checkpoint);
+
+                // Add to done queue for next checkpoint
+                // TODO
             }
 
             // Check if the main thread is done queueing
@@ -265,7 +304,7 @@ private:
      */
     bool done_queueing() {
         unique_lock<mutex> lk(globals.mtx);
-        return globals.all_queued;
+        return globals.last_queued == globals.checkpoint[0];
     }
 };
 
@@ -293,9 +332,11 @@ void flush_primes(const tbb::concurrent_unordered_map<uint64_t,bool> *results, u
  * Wait for all threads to be done processing up to the current checkpoint
  */
 void wait_for_threads(ThreadContext *contexts) {
+    cout << "Main Waiting..." << endl;
     for (size_t i = 0; i < NUM_THREADS; i++) {
         unique_lock<mutex> lk(contexts[i].mtx);
         if (!contexts[i].done_checkpoint) {
+            cout << "Wait t: " << i << endl;
             // If this thread isn't done, wait for it to finish
             contexts[i].cv.wait(lk);
         }
@@ -317,16 +358,18 @@ int main() {
     uint64_t last_queued;
 
     globals.start_range = 2;
-    globals.max_range = 10000000000;
-    // 2 * because for large numbers we could experience a floating point error, but by less than a factor of max_try
-    globals.max_try = 2 * uint64_t(sqrtl(globals.max_range));
+    globals.max_range = 40;
+    // The max try is num/3 because the lowest multiple we might process is num * 3. Add 1 because range not inclusive.
+    globals.max_try = globals.max_range / 3 + 1;
 
     // Set up checkpoints
+    // The initial condition is all the same, they will be updated before every iteration
     globals.checkpoint[3] = globals.start_range;
     globals.checkpoint[2] = globals.start_range;
     globals.checkpoint[1] = globals.start_range;
     globals.checkpoint[0] = globals.start_range;
-    globals.update_checkpoint();
+
+    globals.last_queued = globals.checkpoint[0];
 
     globals.result_table = NULL;
     globals.primes_table = NULL;
@@ -335,9 +378,8 @@ int main() {
     // Split into threads
     thread threads[NUM_THREADS];
     ThreadContext contexts[NUM_THREADS]; // Relying on default initialization
-    for (size_t i = 0; i < NUM_THREADS; i++) {
-        threads[i] = thread(contexts[i].run, &contexts[i]);
-    }
+    // Whether the threads have been started yet
+    bool started = false;
 
     while (globals.checkpoint[0] < globals.max_range) {
 
@@ -351,33 +393,43 @@ int main() {
             globals.result_table = new tbb::concurrent_unordered_map<uint64_t,bool>();
 
             globals.update_checkpoint();
-            globals.all_queued = false;
             globals.cv.notify_all();
         }
+        if (!started) {
+            // Only start the threads running the first iteration
+            for (size_t i = 0; i < NUM_THREADS; i++) {
+                threads[i] = thread(&ThreadContext::run, &contexts[i]);
+            }
+            started = true;
+        }
 
-        size_t next_thread = NUM_THREADS;
+        size_t next_thread = 0;
+        uint64_t checkpoint_try = globals.checkpoint[0] / 3 + 1;
         for (
                 // Start at first odd number after end of last checkpoint
                 uint64_t i = globals.checkpoint[1] + ((globals.checkpoint[1] + 1) % 2);
-                i < globals.checkpoint[0]; // Iterate over every number less than current checkpoint
+                i < checkpoint_try; // Iterate over every number less than sqrt(checkpoint)
                 i = i + 2 // Iterate over odd numbers
                 ) {
+            cout << "Queue: " << i << " thread: " << next_thread << endl;
             next_thread = (next_thread + 1) % NUM_THREADS; // We do this first so it happens outside of the lock
             unique_lock<mutex> lk(contexts[next_thread].mtx);
             contexts[next_thread].q.push(i);
+            contexts[next_thread].done_checkpoint = false;
             contexts[next_thread].cv.notify_all();
         }
 
         {
             unique_lock<mutex> lk(globals.mtx);
-            globals.all_queued = true;
+            globals.last_queued = globals.checkpoint[0];
+            cout << "All Queued" << endl;
 
-            // Here we must notify all threads again in case they checked all_queued to be false between when their
+            // Here we must notify all threads again in case they checked last_queued to be false between when their
             // last value was finished and now correcting that race condition.
             // Note that we call this while still holding globals.mtx and notify_all_threads acquires individual
             // thread locks. This prevents threads from checking for a queue and then sleeping between when we finish
-            // and when we declare we are done in a thread ordering where they see all_queued == false but do not sleep
-            // until after notify_all_threads is done.
+            // and when we declare we are done in a thread ordering where they see last_queued == last checkpoint but
+            // do not sleep until after notify_all_threads is done.
             notify_all_threads(contexts);
         }
 
